@@ -1,7 +1,7 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 main_menu_kb = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="Kontент-план", callback_data="content_plan")],
+    [InlineKeyboardButton(text="Контент-план", callback_data="content_plan")],
     [InlineKeyboardButton(text="Хештеги", callback_data="hashtags")],
     [InlineKeyboardButton(text="Шаблоны", callback_data="templates")],
     [InlineKeyboardButton(text="Заметки / Идеи", callback_data="notes")],
@@ -54,3 +54,18 @@ def item_actions_kb(prefix: str, item_id: int, back_to: str) -> InlineKeyboardMa
         ],
         [InlineKeyboardButton(text="Назад", callback_data=back_to)],
     ])
+
+
+def edit_fields_kb(
+    prefix: str, item_id: int, fields: list[tuple[str, str]], back_to: str,
+) -> InlineKeyboardMarkup:
+    """Клавиатура выбора поля для редактирования.
+
+    fields — список кортежей (field_key, label), например [("title", "Заголовок")].
+    """
+    buttons = [
+        [InlineKeyboardButton(text=label, callback_data=f"{prefix}_ef:{item_id}:{key}")]
+        for key, label in fields
+    ]
+    buttons.append([InlineKeyboardButton(text="Назад", callback_data=f"{prefix}_view:{item_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)

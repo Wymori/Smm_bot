@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import HashtagSet
-from app.keyboards.main_menu import back_kb, hashtag_menu_kb, item_actions_kb
+from app.keyboards.main_menu import back_kb, edit_fields_kb, hashtag_menu_kb, item_actions_kb
 from app.services.user_service import get_or_create_user
 
 router = Router()
@@ -16,6 +16,10 @@ class CreateHashtagSet(StatesGroup):
     name = State()
     category = State()
     hashtags = State()
+
+
+class EditHashtagSet(StatesGroup):
+    value = State()
 
 
 # --- Menu ---
@@ -120,6 +124,65 @@ async def ht_view(callback: CallbackQuery, session: AsyncSession) -> None:
         reply_markup=item_actions_kb("ht", hs.id, "ht_list"),
     )
     await callback.answer()
+
+
+# --- Edit ---
+
+HT_EDIT_FIELDS = [
+    ("name", "Название"),
+    ("category", "Категория"),
+    ("hashtags", "Хештеги"),
+]
+
+
+@router.callback_query(F.data.startswith("ht_edit:"))
+async def ht_edit_start(callback: CallbackQuery, session: AsyncSession) -> None:
+    hs_id = int(callback.data.split(":")[1])
+    result = await session.execute(select(HashtagSet).where(HashtagSet.id == hs_id))
+    hs = result.scalar_one_or_none()
+    if not hs:
+        await callback.answer("Набор не найден", show_alert=True)
+        return
+    await callback.message.edit_text(
+        f"Редактирование набора \"{hs.name}\".\nВыберите поле:",
+        reply_markup=edit_fields_kb("ht", hs.id, HT_EDIT_FIELDS, "ht_list"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("ht_ef:"))
+async def ht_edit_field(callback: CallbackQuery, state: FSMContext) -> None:
+    _, item_id, field = callback.data.split(":")
+    await state.set_state(EditHashtagSet.value)
+    await state.update_data(edit_id=int(item_id), edit_field=field)
+    labels = dict(HT_EDIT_FIELDS)
+    await callback.message.edit_text(
+        f"Введите новое значение для поля \"{labels[field]}\":",
+        reply_markup=back_kb(f"ht_edit:{item_id}"),
+    )
+    await callback.answer()
+
+
+@router.message(EditHashtagSet.value)
+async def ht_edit_save(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    data = await state.get_data()
+    hs_id, field = data["edit_id"], data["edit_field"]
+    result = await session.execute(select(HashtagSet).where(HashtagSet.id == hs_id))
+    hs = result.scalar_one_or_none()
+    if not hs:
+        await state.clear()
+        await message.answer("Набор не найден.", reply_markup=hashtag_menu_kb())
+        return
+    setattr(hs, field, message.text)
+    await session.commit()
+    await state.clear()
+    cat = f"\nКатегория: {hs.category}" if hs.category else ""
+    text = f"<b>{hs.name}</b>{cat}\n\n{hs.hashtags}"
+    await message.answer(
+        f"Сохранено!\n\n{text}",
+        parse_mode="HTML",
+        reply_markup=item_actions_kb("ht", hs.id, "ht_list"),
+    )
 
 
 # --- Copy hashtags (tap to copy) ---

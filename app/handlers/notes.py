@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import Note
-from app.keyboards.main_menu import back_kb, item_actions_kb, notes_menu_kb
+from app.keyboards.main_menu import back_kb, edit_fields_kb, item_actions_kb, notes_menu_kb
 from app.services.user_service import get_or_create_user
 
 router = Router()
@@ -15,6 +15,10 @@ router = Router()
 class CreateNote(StatesGroup):
     title = State()
     text = State()
+
+
+class EditNote(StatesGroup):
+    value = State()
 
 
 # --- Menu ---
@@ -101,6 +105,63 @@ async def note_view(callback: CallbackQuery, session: AsyncSession) -> None:
         reply_markup=item_actions_kb("note", note.id, "note_list"),
     )
     await callback.answer()
+
+
+# --- Edit ---
+
+NOTE_EDIT_FIELDS = [
+    ("title", "Заголовок"),
+    ("text", "Текст"),
+]
+
+
+@router.callback_query(F.data.startswith("note_edit:"))
+async def note_edit_start(callback: CallbackQuery, session: AsyncSession) -> None:
+    note_id = int(callback.data.split(":")[1])
+    result = await session.execute(select(Note).where(Note.id == note_id))
+    note = result.scalar_one_or_none()
+    if not note:
+        await callback.answer("Заметка не найдена", show_alert=True)
+        return
+    await callback.message.edit_text(
+        f"Редактирование заметки \"{note.title}\".\nВыберите поле:",
+        reply_markup=edit_fields_kb("note", note.id, NOTE_EDIT_FIELDS, "note_list"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("note_ef:"))
+async def note_edit_field(callback: CallbackQuery, state: FSMContext) -> None:
+    _, item_id, field = callback.data.split(":")
+    await state.set_state(EditNote.value)
+    await state.update_data(edit_id=int(item_id), edit_field=field)
+    labels = dict(NOTE_EDIT_FIELDS)
+    await callback.message.edit_text(
+        f"Введите новое значение для поля \"{labels[field]}\":",
+        reply_markup=back_kb(f"note_edit:{item_id}"),
+    )
+    await callback.answer()
+
+
+@router.message(EditNote.value)
+async def note_edit_save(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    data = await state.get_data()
+    note_id, field = data["edit_id"], data["edit_field"]
+    result = await session.execute(select(Note).where(Note.id == note_id))
+    note = result.scalar_one_or_none()
+    if not note:
+        await state.clear()
+        await message.answer("Заметка не найдена.", reply_markup=notes_menu_kb())
+        return
+    setattr(note, field, message.text)
+    await session.commit()
+    await state.clear()
+    text = f"<b>{note.title}</b>\n\n{note.text}"
+    await message.answer(
+        f"Сохранено!\n\n{text}",
+        parse_mode="HTML",
+        reply_markup=item_actions_kb("note", note.id, "note_list"),
+    )
 
 
 # --- Delete ---

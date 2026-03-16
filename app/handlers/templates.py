@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import Template
-from app.keyboards.main_menu import back_kb, item_actions_kb, template_menu_kb
+from app.keyboards.main_menu import back_kb, edit_fields_kb, item_actions_kb, template_menu_kb
 from app.services.user_service import get_or_create_user
 
 router = Router()
@@ -24,6 +24,10 @@ class CreateTemplate(StatesGroup):
     template_type = State()
     name = State()
     content = State()
+
+
+class EditTemplate(StatesGroup):
+    value = State()
 
 
 # --- Menu ---
@@ -133,6 +137,63 @@ async def tpl_view(callback: CallbackQuery, session: AsyncSession) -> None:
         reply_markup=item_actions_kb("tpl", tpl.id, "tpl_list"),
     )
     await callback.answer()
+
+
+# --- Edit ---
+
+TPL_EDIT_FIELDS = [
+    ("name", "Название"),
+    ("content", "Содержимое"),
+]
+
+
+@router.callback_query(F.data.startswith("tpl_edit:"))
+async def tpl_edit_start(callback: CallbackQuery, session: AsyncSession) -> None:
+    tpl_id = int(callback.data.split(":")[1])
+    result = await session.execute(select(Template).where(Template.id == tpl_id))
+    tpl = result.scalar_one_or_none()
+    if not tpl:
+        await callback.answer("Шаблон не найден", show_alert=True)
+        return
+    await callback.message.edit_text(
+        f"Редактирование шаблона \"{tpl.name}\".\nВыберите поле:",
+        reply_markup=edit_fields_kb("tpl", tpl.id, TPL_EDIT_FIELDS, "tpl_list"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tpl_ef:"))
+async def tpl_edit_field(callback: CallbackQuery, state: FSMContext) -> None:
+    _, item_id, field = callback.data.split(":")
+    await state.set_state(EditTemplate.value)
+    await state.update_data(edit_id=int(item_id), edit_field=field)
+    labels = dict(TPL_EDIT_FIELDS)
+    await callback.message.edit_text(
+        f"Введите новое значение для поля \"{labels[field]}\":",
+        reply_markup=back_kb(f"tpl_edit:{item_id}"),
+    )
+    await callback.answer()
+
+
+@router.message(EditTemplate.value)
+async def tpl_edit_save(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    data = await state.get_data()
+    tpl_id, field = data["edit_id"], data["edit_field"]
+    result = await session.execute(select(Template).where(Template.id == tpl_id))
+    tpl = result.scalar_one_or_none()
+    if not tpl:
+        await state.clear()
+        await message.answer("Шаблон не найден.", reply_markup=template_menu_kb())
+        return
+    setattr(tpl, field, message.text)
+    await session.commit()
+    await state.clear()
+    text = f"<b>{tpl.name}</b>\nТип: {type_labels.get(tpl.template_type, tpl.template_type)}\n\n{tpl.content}"
+    await message.answer(
+        f"Сохранено!\n\n{text}",
+        parse_mode="HTML",
+        reply_markup=item_actions_kb("tpl", tpl.id, "tpl_list"),
+    )
 
 
 # --- Delete ---

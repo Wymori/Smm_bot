@@ -49,9 +49,3 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
-
-BOT_TOKEN=your_telegram_bot_token_here
-DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/smm_bot
-# AI integration (for future use)
-OPENAI_API_KEY=your_openai_api_key_here
-ANTHROPIC_API_KEY=your_anthropic_api_key_here

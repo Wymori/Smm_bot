@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import ContentPlan
-from app.keyboards.main_menu import back_kb, content_plan_menu_kb, item_actions_kb
+from app.keyboards.main_menu import back_kb, content_plan_menu_kb, edit_fields_kb, item_actions_kb
 from app.services.user_service import get_or_create_user
 
 router = Router()
@@ -16,6 +16,10 @@ class CreatePost(StatesGroup):
     title = State()
     text = State()
     platform = State()
+
+
+class EditPost(StatesGroup):
+    value = State()
 
 
 # --- Menu ---
@@ -115,6 +119,64 @@ async def cp_view(callback: CallbackQuery, session: AsyncSession) -> None:
         reply_markup=item_actions_kb("cp", post.id, "cp_list"),
     )
     await callback.answer()
+
+
+# --- Edit ---
+
+CP_EDIT_FIELDS = [
+    ("title", "Заголовок"),
+    ("text", "Текст"),
+    ("platform", "Платформа"),
+]
+
+
+@router.callback_query(F.data.startswith("cp_edit:"))
+async def cp_edit_start(callback: CallbackQuery, session: AsyncSession) -> None:
+    post_id = int(callback.data.split(":")[1])
+    result = await session.execute(select(ContentPlan).where(ContentPlan.id == post_id))
+    post = result.scalar_one_or_none()
+    if not post:
+        await callback.answer("Пост не найден", show_alert=True)
+        return
+    await callback.message.edit_text(
+        f"Редактирование поста \"{post.title}\".\nВыберите поле:",
+        reply_markup=edit_fields_kb("cp", post.id, CP_EDIT_FIELDS, "cp_list"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cp_ef:"))
+async def cp_edit_field(callback: CallbackQuery, state: FSMContext) -> None:
+    _, item_id, field = callback.data.split(":")
+    await state.set_state(EditPost.value)
+    await state.update_data(edit_id=int(item_id), edit_field=field)
+    labels = dict(CP_EDIT_FIELDS)
+    await callback.message.edit_text(
+        f"Введите новое значение для поля \"{labels[field]}\":",
+        reply_markup=back_kb(f"cp_edit:{item_id}"),
+    )
+    await callback.answer()
+
+
+@router.message(EditPost.value)
+async def cp_edit_save(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    data = await state.get_data()
+    post_id, field = data["edit_id"], data["edit_field"]
+    result = await session.execute(select(ContentPlan).where(ContentPlan.id == post_id))
+    post = result.scalar_one_or_none()
+    if not post:
+        await state.clear()
+        await message.answer("Пост не найден.", reply_markup=content_plan_menu_kb())
+        return
+    setattr(post, field, message.text)
+    await session.commit()
+    await state.clear()
+    text = f"<b>{post.title}</b>\n\n{post.text or '(нет текста)'}\n\nПлатформа: {post.platform}"
+    await message.answer(
+        f"Сохранено!\n\n{text}",
+        parse_mode="HTML",
+        reply_markup=item_actions_kb("cp", post.id, "cp_list"),
+    )
 
 
 # --- Delete ---
