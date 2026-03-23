@@ -1,3 +1,5 @@
+import re
+
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -6,22 +8,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import Template
-from app.keyboards.main_menu import back_kb, edit_fields_kb, item_actions_kb, template_menu_kb
+from app.keyboards.main_menu import back_kb, confirm_delete_kb, edit_fields_kb, item_actions_kb, paginate, pagination_row, template_menu_kb
 from app.services.user_service import get_or_create_user
 
 router = Router()
 
-TEMPLATE_TYPES = {
-    "tpl_type_post": "post",
-    "tpl_type_story": "story",
-    "tpl_type_brief": "brief",
-}
-
-type_labels = {"post": "Пост", "story": "Сторис", "brief": "ТЗ для дизайнера"}
-
 
 class CreateTemplate(StatesGroup):
-    template_type = State()
     name = State()
     content = State()
 
@@ -30,12 +23,43 @@ class EditTemplate(StatesGroup):
     value = State()
 
 
+# --- Helpers ---
+
+def _find_variables(text: str) -> list[str]:
+    """Находит уникальные {переменные} в тексте, сохраняя порядок."""
+    seen = set()
+    result = []
+    for match in re.finditer(r"\{([^}]+)\}", text):
+        var = match.group(1)
+        if var not in seen:
+            seen.add(var)
+            result.append(var)
+    return result
+
+
+def _tpl_card(tpl: Template) -> str:
+    lines = [f"📝 <b>{tpl.name}</b>"]
+    variables = _find_variables(tpl.content)
+    if variables:
+        var_list = ", ".join(f"{{{v}}}" for v in variables)
+        lines.append(f"🔤 Переменные: <code>{var_list}</code>")
+    lines.append("")
+    lines.append(tpl.content)
+    return "\n".join(lines)
+
+
 # --- Menu ---
 
 @router.callback_query(F.data == "templates")
 async def template_menu(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
-    await callback.message.edit_text("Шаблоны:", reply_markup=template_menu_kb())
+    await callback.message.edit_text(
+        "📝 <b>Шаблоны</b>\n\n"
+        "Создавайте шаблоны постов с переменными\n"
+        "и используйте их в контент-плане:",
+        parse_mode="HTML",
+        reply_markup=template_menu_kb(),
+    )
     await callback.answer()
 
 
@@ -43,22 +67,14 @@ async def template_menu(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data == "tpl_create")
 async def tpl_create_start(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(CreateTemplate.template_type)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Пост", callback_data="tpl_type_post")],
-        [InlineKeyboardButton(text="Сторис", callback_data="tpl_type_story")],
-        [InlineKeyboardButton(text="ТЗ для дизайнера", callback_data="tpl_type_brief")],
-        [InlineKeyboardButton(text="Назад", callback_data="templates")],
-    ])
-    await callback.message.edit_text("Выберите тип шаблона:", reply_markup=kb)
-    await callback.answer()
-
-
-@router.callback_query(CreateTemplate.template_type, F.data.in_(TEMPLATE_TYPES))
-async def tpl_create_type(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.update_data(template_type=TEMPLATE_TYPES[callback.data])
     await state.set_state(CreateTemplate.name)
-    await callback.message.edit_text("Введите название шаблона:", reply_markup=back_kb("templates"))
+    await callback.message.edit_text(
+        "📝 <b>Новый шаблон</b>\n\n"
+        "Введите название шаблона:\n"
+        "<i>Например: «Анонс продукта», «Отзыв клиента»</i>",
+        parse_mode="HTML",
+        reply_markup=back_kb("templates"),
+    )
     await callback.answer()
 
 
@@ -67,8 +83,15 @@ async def tpl_create_name(message: Message, state: FSMContext) -> None:
     await state.update_data(name=message.text)
     await state.set_state(CreateTemplate.content)
     await message.answer(
-        "Введите содержимое шаблона.\n\n"
-        "Можете использовать переменные: {название}, {дата}, {продукт} и т.д."
+        "✍️ <b>Введите содержимое шаблона</b>\n\n"
+        "💡 <b>Переменные</b> — слова в фигурных скобках, "
+        "которые будут заменены при создании поста:\n\n"
+        "<code>Встречайте {продукт}!\n"
+        "Цена: {цена}\n"
+        "Только до {дата}!</code>\n\n"
+        "Вы можете придумать любые переменные — "
+        "бот спросит их значения при создании поста.",
+        parse_mode="HTML",
     )
 
 
@@ -83,40 +106,75 @@ async def tpl_create_content(message: Message, state: FSMContext, session: Async
         user_id=user.id,
         name=data["name"],
         content=message.text,
-        template_type=data["template_type"],
     )
     session.add(tpl)
     await session.commit()
 
+    variables = _find_variables(message.text)
+    var_info = ""
+    if variables:
+        var_list = ", ".join(f"{{{v}}}" for v in variables)
+        var_info = f"\n🔤 Переменные: <code>{var_list}</code>"
+
     await state.clear()
-    await message.answer(f"Шаблон \"{data['name']}\" сохранен!", reply_markup=template_menu_kb())
+    await message.answer(
+        f"✅ Шаблон <b>«{data['name']}»</b> сохранён!{var_info}",
+        parse_mode="HTML",
+        reply_markup=template_menu_kb(),
+    )
 
 
 # --- List ---
 
-@router.callback_query(F.data == "tpl_list")
-async def tpl_list(callback: CallbackQuery, session: AsyncSession) -> None:
+async def _show_tpl_list(callback: CallbackQuery, session: AsyncSession, page: int = 0) -> None:
     user = await get_or_create_user(
         session, callback.from_user.id, callback.from_user.username, callback.from_user.full_name
     )
     result = await session.execute(
-        select(Template).where(Template.user_id == user.id).order_by(Template.created_at.desc()).limit(20)
+        select(Template).where(Template.user_id == user.id).order_by(Template.created_at.desc())
     )
-    templates = result.scalars().all()
+    all_templates = result.scalars().all()
 
-    if not templates:
-        await callback.message.edit_text("У вас пока нет шаблонов.", reply_markup=template_menu_kb())
+    if not all_templates:
+        await callback.message.edit_text(
+            "📭 <b>У вас пока нет шаблонов.</b>\n\n"
+            "Нажмите «Создать шаблон», чтобы начать!",
+            parse_mode="HTML",
+            reply_markup=template_menu_kb(),
+        )
         await callback.answer()
         return
 
+    templates, page, total = paginate(all_templates, page)
     buttons = []
     for t in templates:
-        label = f"[{type_labels.get(t.template_type, t.template_type)}] {t.name}"
-        buttons.append([InlineKeyboardButton(text=label, callback_data=f"tpl_view:{t.id}")])
-    buttons.append([InlineKeyboardButton(text="Назад", callback_data="templates")])
+        var_count = len(_find_variables(t.content))
+        badge = f" 🔤{var_count}" if var_count else ""
+        buttons.append([InlineKeyboardButton(
+            text=f"📝 {t.name}{badge}",
+            callback_data=f"tpl_view:{t.id}",
+        )])
+    if total > 1:
+        buttons.append(pagination_row("tpl_page", page, total))
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="templates")])
 
-    await callback.message.edit_text("Ваши шаблоны:", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.message.edit_text(
+        "📝 <b>Ваши шаблоны:</b>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
     await callback.answer()
+
+
+@router.callback_query(F.data == "tpl_list")
+async def tpl_list(callback: CallbackQuery, session: AsyncSession) -> None:
+    await _show_tpl_list(callback, session)
+
+
+@router.callback_query(F.data.startswith("tpl_page:"))
+async def tpl_list_page(callback: CallbackQuery, session: AsyncSession) -> None:
+    page = int(callback.data.split(":")[1])
+    await _show_tpl_list(callback, session, page)
 
 
 # --- View ---
@@ -131,9 +189,8 @@ async def tpl_view(callback: CallbackQuery, session: AsyncSession) -> None:
         await callback.answer("Шаблон не найден", show_alert=True)
         return
 
-    text = f"<b>{tpl.name}</b>\nТип: {type_labels.get(tpl.template_type, tpl.template_type)}\n\n{tpl.content}"
     await callback.message.edit_text(
-        text, parse_mode="HTML",
+        _tpl_card(tpl), parse_mode="HTML",
         reply_markup=item_actions_kb("tpl", tpl.id, "tpl_list"),
     )
     await callback.answer()
@@ -156,20 +213,32 @@ async def tpl_edit_start(callback: CallbackQuery, session: AsyncSession) -> None
         await callback.answer("Шаблон не найден", show_alert=True)
         return
     await callback.message.edit_text(
-        f"Редактирование шаблона \"{tpl.name}\".\nВыберите поле:",
-        reply_markup=edit_fields_kb("tpl", tpl.id, TPL_EDIT_FIELDS, "tpl_list"),
+        f"✏️ <b>Редактирование шаблона</b>\n\n"
+        f"📝 {tpl.name}\n\n"
+        f"Выберите поле для изменения:",
+        parse_mode="HTML",
+        reply_markup=edit_fields_kb("tpl", tpl.id, TPL_EDIT_FIELDS),
     )
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("tpl_ef:"))
-async def tpl_edit_field(callback: CallbackQuery, state: FSMContext) -> None:
+async def tpl_edit_field(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
     _, item_id, field = callback.data.split(":")
     await state.set_state(EditTemplate.value)
     await state.update_data(edit_id=int(item_id), edit_field=field)
+
+    result = await session.execute(select(Template).where(Template.id == int(item_id)))
+    tpl = result.scalar_one_or_none()
     labels = dict(TPL_EDIT_FIELDS)
+    current = getattr(tpl, field, "") if tpl else ""
+
     await callback.message.edit_text(
-        f"Введите новое значение для поля \"{labels[field]}\":",
+        f"✏️ <b>Редактирование: {labels[field]}</b>\n\n"
+        f"Текущее — нажмите, чтобы скопировать:\n"
+        f"<code>{current}</code>\n\n"
+        f"Введите новое значение:",
+        parse_mode="HTML",
         reply_markup=back_kb(f"tpl_edit:{item_id}"),
     )
     await callback.answer()
@@ -183,14 +252,13 @@ async def tpl_edit_save(message: Message, state: FSMContext, session: AsyncSessi
     tpl = result.scalar_one_or_none()
     if not tpl:
         await state.clear()
-        await message.answer("Шаблон не найден.", reply_markup=template_menu_kb())
+        await message.answer("❌ Шаблон не найден.", reply_markup=template_menu_kb())
         return
     setattr(tpl, field, message.text)
     await session.commit()
     await state.clear()
-    text = f"<b>{tpl.name}</b>\nТип: {type_labels.get(tpl.template_type, tpl.template_type)}\n\n{tpl.content}"
     await message.answer(
-        f"Сохранено!\n\n{text}",
+        f"✅ <b>Сохранено!</b>\n\n{_tpl_card(tpl)}",
         parse_mode="HTML",
         reply_markup=item_actions_kb("tpl", tpl.id, "tpl_list"),
     )
@@ -199,12 +267,29 @@ async def tpl_edit_save(message: Message, state: FSMContext, session: AsyncSessi
 # --- Delete ---
 
 @router.callback_query(F.data.startswith("tpl_del:"))
-async def tpl_delete(callback: CallbackQuery, session: AsyncSession, state: FSMContext) -> None:
+async def tpl_delete_ask(callback: CallbackQuery, session: AsyncSession) -> None:
+    tpl_id = int(callback.data.split(":")[1])
+    result = await session.execute(select(Template).where(Template.id == tpl_id))
+    tpl = result.scalar_one_or_none()
+    if not tpl:
+        await callback.answer("Шаблон не найден", show_alert=True)
+        return
+    await callback.message.edit_text(
+        f"🗑 <b>Удаление шаблона</b>\n\n"
+        f"Вы уверены, что хотите удалить «{tpl.name}»?",
+        parse_mode="HTML",
+        reply_markup=confirm_delete_kb("tpl", tpl.id),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tpl_confirm_del:"))
+async def tpl_delete_confirm(callback: CallbackQuery, session: AsyncSession, state: FSMContext) -> None:
     tpl_id = int(callback.data.split(":")[1])
     result = await session.execute(select(Template).where(Template.id == tpl_id))
     tpl = result.scalar_one_or_none()
     if tpl:
         await session.delete(tpl)
         await session.commit()
-    await callback.answer("Удалено")
+    await callback.answer("✅ Удалено")
     await template_menu(callback, state)

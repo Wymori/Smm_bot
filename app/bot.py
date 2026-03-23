@@ -6,6 +6,8 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 from app.config import settings
+from sqlalchemy import text
+
 from app.database.engine import engine
 from app.database.models import Base
 from app.handlers import content_plan, hashtags, notes, start, templates
@@ -15,6 +17,9 @@ from app.middlewares.db import DbSessionMiddleware
 async def on_startup(bot: Bot) -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(text(
+            "ALTER TABLE content_plans ADD COLUMN IF NOT EXISTS hashtags TEXT"
+        ))
     logging.info("Database tables created")
 
 

@@ -30,6 +30,7 @@ class ContentPlan(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     title: Mapped[str] = mapped_column(String(255))
     text: Mapped[str | None] = mapped_column(Text)
+    hashtags: Mapped[str | None] = mapped_column(Text)
     platform: Mapped[str] = mapped_column(String(50), default="telegram")
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_published: Mapped[bool] = mapped_column(default=False)
@@ -58,7 +59,7 @@ class Template(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     name: Mapped[str] = mapped_column(String(255))
     content: Mapped[str] = mapped_column(Text)
-    template_type: Mapped[str] = mapped_column(String(50))  # post, story, brief
+    template_type: Mapped[str] = mapped_column(String(50), default="general")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     user: Mapped["User"] = relationship(back_populates="templates")
