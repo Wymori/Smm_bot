@@ -205,7 +205,8 @@ TPL_EDIT_FIELDS = [
 
 
 @router.callback_query(F.data.startswith("tpl_edit:"))
-async def tpl_edit_start(callback: CallbackQuery, session: AsyncSession) -> None:
+async def tpl_edit_start(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    await state.clear()
     tpl_id = int(callback.data.split(":")[1])
     result = await session.execute(select(Template).where(Template.id == tpl_id))
     tpl = result.scalar_one_or_none()

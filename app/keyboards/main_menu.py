@@ -28,6 +28,7 @@ main_menu_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🏷 Хештеги", callback_data="hashtags")],
     [InlineKeyboardButton(text="📝 Шаблоны", callback_data="templates")],
     [InlineKeyboardButton(text="💡 Заметки / Идеи", callback_data="notes")],
+    [InlineKeyboardButton(text="⚙️ Каналы", callback_data="channels")],
 ])
 
 

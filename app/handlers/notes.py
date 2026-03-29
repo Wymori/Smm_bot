@@ -160,7 +160,8 @@ NOTE_EDIT_FIELDS = [
 
 
 @router.callback_query(F.data.startswith("note_edit:"))
-async def note_edit_start(callback: CallbackQuery, session: AsyncSession) -> None:
+async def note_edit_start(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    await state.clear()
     note_id = int(callback.data.split(":")[1])
     result = await session.execute(select(Note).where(Note.id == note_id))
     note = result.scalar_one_or_none()

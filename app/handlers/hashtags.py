@@ -198,7 +198,8 @@ HT_EDIT_FIELDS = [
 
 
 @router.callback_query(F.data.startswith("ht_edit:"))
-async def ht_edit_start(callback: CallbackQuery, session: AsyncSession) -> None:
+async def ht_edit_start(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    await state.clear()
     hs_id = int(callback.data.split(":")[1])
     result = await session.execute(select(HashtagSet).where(HashtagSet.id == hs_id))
     hs = result.scalar_one_or_none()

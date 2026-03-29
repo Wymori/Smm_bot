@@ -6,7 +6,8 @@
 - **Python 3.12+**, aiogram 3.13, SQLAlchemy 2.0 (async), asyncpg, PostgreSQL 16
 - **Alembic** — настроен (`alembic.ini` + `alembic/env.py`), но `versions/` пуст — таблицы создаются через `create_all`
 - **Pydantic Settings** — конфигурация из `.env`
-- Установлены, но пока не используются: `apscheduler`, `pillow`
+- **APScheduler** — публикация постов по расписанию (`AsyncIOScheduler`, timezone Moscow)
+- Установлены, но пока не используются: `pillow`
 
 ## Команды
 ```bash
@@ -35,30 +36,37 @@ alembic upgrade head
 **Глобальный `parse_mode=HTML`** задан в `DefaultBotProperties` при создании Bot — не нужно указывать в каждом `message.answer()`.
 
 ## Модели БД (`app/database/models.py`)
-5 моделей: **User**, **ContentPlan**, **HashtagSet**, **Template**, **Note**.
+8 моделей: **User**, **ContentPlan**, **ContentPlanMedia**, **HashtagSet**, **Template**, **Note**, **Channel**, **SchedulePreset**.
 Все связаны с User через FK с каскадным удалением (`ondelete="CASCADE"` + `cascade="all, delete-orphan"`).
 
 ### Ключевые поля
 - **ContentPlan**: `title`, `text`, `hashtags` (отдельное поле!), `platform` (telegram/instagram), `scheduled_at`, `is_published`
+- **ContentPlanMedia**: `content_plan_id` (FK), `file_id`, `media_type` (photo/video/document/audio/animation/voice/video_note/sticker), `file_name`
 - **HashtagSet**: `name`, `hashtags` (текст через пробел), `category`
 - **Template**: `name`, `content`, `template_type` (default="general", типы убраны из UI)
 - **Note**: `title`, `text`
+- **Channel**: `channel_id` (BigInteger, Telegram channel ID), `title`, `username`, `platform` (telegram/instagram)
+- **SchedulePreset**: `name`, `preset_type` (hours/days), `hours`, `days`, `hour`, `minute`, `sort_order`
 
 ## Паттерны кода
 
 ### Callback data
 Формат: `{prefix}_{action}:{id}` или `{prefix}_{action}:{id}:{field}`
-- Контент-план: `cp_` (view, edit, ef, del, confirm_del, add_ht, toggle_ht, custom_ht, publish, from_tpl, use_tpl, page)
+- Контент-план: `cp_` (view, edit, ef, del, confirm_del, add_ht, toggle_ht, custom_ht, publish, do_publish, from_tpl, use_tpl, page, media, media_show, media_rm, media_add, media_add_done, media_done, schedule, sched_ch, sched_use, sched_quick, unschedule, presets, preset_add, preset_del, preset_type)
 - Хештеги: `ht_` (view, edit, ef, del, confirm_del, copy, page)
 - Шаблоны: `tpl_` (view, edit, ef, del, confirm_del, page)
 - Заметки: `note_` (view, edit, ef, del, confirm_del, page)
-- Служебные: `main_menu`, `noop` (для кнопки-счётчика страниц)
+- Каналы: `ch_` (add, list, view, del, confirm_del)
+- Служебные: `main_menu`, `channels`, `noop` (для кнопки-счётчика страниц)
 
 ### FSM-состояния
 - **Создание**: `Create{Entity}` — пошаговый ввод полей
 - **Редактирование**: `Edit{Entity}` — одно состояние `value`, в `state.data` хранятся `edit_id` и `edit_field`
 - **Хештеги в постах**: `AddHashtags.custom` — ввод пользовательских хештегов для поста
-- **Пост из шаблона**: `CreateFromTemplate` (title → fill_variable) → переиспользует `CreatePost.platform` для выбора платформы
+- **Медиа**: `AddMedia.waiting` — добавление медиа к существующему посту; `CreatePost.media` — шаг медиа при создании
+- **Пост из шаблона**: `CreateFromTemplate` (title → fill_variable) → переиспользует `CreatePost.media`
+- **Расписание**: `SchedulePost.datetime_input` — ручной ввод даты/времени; `CreatePreset` (hours/days/time) — создание пользовательских шаблонов времени
+- **Каналы**: `AddChannel.waiting` — привязка канала через forward
 
 ### Клавиатуры (`keyboards/main_menu.py`)
 Общие фабрики: `item_actions_kb()`, `edit_fields_kb()`, `confirm_delete_kb()`, `back_kb()`
@@ -78,14 +86,30 @@ alembic upgrade head
 
 ### Контент-план
 - После создания поста показывается карточка с действиями (не меню)
-- Выбор платформы: Telegram / Instagram (Instagram — заглушка)
+- Выбор платформы убран из UI — определяется каналом при публикации
 - **Хештеги хранятся отдельно** в поле `hashtags` (не в `text`!), колонка добавляется через ALTER TABLE в on_startup
 - **Флаги наборов**: ✅ = набор применён (хотя бы частично), ➕ = не применён. Нажатие переключает (toggle)
 - Хелперы: `_is_set_applied()`, `_add_tags()`, `_remove_tags()` — case-insensitive сравнение, без дубликатов
 - **Валидация**: свои хештеги и редактирование — каждое слово должно начинаться с `#`
 - **Редактирование хештегов**: через "Редактировать" → "Хештеги" — показывает текущие в `<code>`, можно заменить или «-» для очистки
-- **Публикация**: заглушка (`show_alert`), функция в разработке
-- Поля `scheduled_at` и `is_published` отображаются в карточке, но устанавливаются пока только вручную в БД
+- **Медиа-вложения**: при создании поста — шаг прикрепления медиа (фото/видео/документы/аудио/GIF/голосовые/кружки/стикеры). Кнопка «📎 Медиа» в карточке — просмотр, добавление, удаление вложений
+- **Публикация в канал**: кнопка «📤 Опубликовать» → выбор канала (группировка по платформе) → отправка. `is_published` ставится в True после успешной публикации
+- **Публикация по расписанию**: кнопка «🕐 По расписанию» → выбор канала → быстрые варианты (1ч, 3ч, завтра 10:00/18:00) или ручной ввод `ДД.ММ.ГГГГ ЧЧ:ММ` (МСК). APScheduler выполняет job, уведомляет пользователя. При рестарте бота — перезагрузка запланированных постов. Кнопка «❌ Отменить расписание» для отмены
+
+### Каналы
+- Раздел «⚙️ Каналы» в главном меню
+- Подключение через forward сообщения из канала
+- Бот проверяет что он является администратором канала
+- Просмотр списка каналов, отключение (удаление)
+
+### Публикация (`app/services/publish_service.py`)
+- Группировка медиа по совместимым типам (ограничения Telegram API):
+  - Фото + видео → одна `sendMediaGroup`
+  - Документы → отдельная `sendMediaGroup`
+  - Аудио → отдельная `sendMediaGroup`
+  - GIF, голосовые, кружки, стикеры → каждый отдельным сообщением
+- Caption (текст + хештеги) прикрепляется к первому медиа
+- Если медиа нет — обычный `sendMessage`
 
 ### Хештеги
 - Кнопка «Копировать» — отправляет хештеги в `<code>` для удобного копирования
@@ -95,7 +119,7 @@ alembic upgrade head
 - Типы убраны из UI (поле `template_type` в БД сохраняется с default="general")
 - **Переменные**: текст в `{фигурных скобках}` → при создании поста из шаблона бот просит заполнить каждую
 - Детект переменных: `_find_variables()` (regex `\{([^}]+)\}`) — дублируется в `templates.py` и `content_plan.py`
-- Связь с контент-планом: кнопка «📝 Из шаблона» в меню контент-плана → выбор шаблона → заголовок → переменные → платформа → пост
+- Связь с контент-планом: кнопка «📝 Из шаблона» в меню контент-плана → выбор шаблона → заголовок → переменные → медиа → пост
 
 ## Конфигурация
 - `.env` — секреты (BOT_TOKEN, DATABASE_URL), лежит в корне проекта
@@ -105,23 +129,26 @@ alembic upgrade head
 
 ## Что реализовано
 - Полный CRUD для 4 разделов (контент-планы, хештеги, шаблоны, заметки)
+- Подключение Telegram-каналов (через forward) с проверкой прав бота
+- Публикация постов в каналы с поддержкой медиа (группировка по типам)
+- Медиа-вложения к постам: фото, видео, документы, аудио, GIF, голосовые, кружки, стикеры
 - Пагинация списков (по 5 элементов, кнопки ◀️/▶️)
 - Главное меню с навигацией и эмодзи
 - FSM для создания/редактирования
 - Подтверждение удаления во всех разделах
 - Хештеги к постам: toggle-флаги ✅/➕, свои с валидацией, редактирование
 - Копирование хештегов и текущих значений при редактировании через `<code>`
-- Выбор платформы при создании поста
 - Создание постов из шаблонов с подстановкой переменных
+- Публикация по расписанию с пользовательскими шаблонами времени
 - Middleware для автоинъекции сессии БД
 - Сервис создания/получения пользователя
 - Скрипт тестовых данных (`seed_data.py`)
 
 ## Что НЕ реализовано
 - Alembic миграции (`versions/` пуст)
-- Публикация по расписанию (APScheduler установлен, но не подключён)
-- Подключение бота к Telegram-каналам для публикации
+- Настройка таймзоны пользователя (сейчас по умолчанию МСК)
 - Instagram-интеграция (платформа выбирается, но публикация — заглушка)
-- AI-генерация текста (ключи OpenAI/Anthropic в конфиге, не используются)
+- AI-генерация текста
 - Медиа-инструменты (Pillow установлен, не используется)
 - Аналитика, калькулятор цен, авто-отчёты, чек-листы
+- Telegram Mini App — весь функционал бота должен быть продублирован в веб-интерфейсе (Mini App)
